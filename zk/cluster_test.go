@@ -39,6 +39,10 @@ func TestBasicCluster(t *testing.T) {
 		t.Fatalf("Create failed on node 1: %+v", err)
 	}
 
+	if _, err := zk2.Sync("/gozk-test"); err != nil {
+		t.Fatalf("Sync failed on node 2: %+v", err)
+	}
+
 	if by, _, err := zk2.Get("/gozk-test"); err != nil {
 		t.Fatalf("Get failed on node 2: %+v", err)
 	} else if string(by) != "foo-cluster" {
@@ -150,7 +154,7 @@ func TestNoQuorum(t *testing.T) {
 	DefaultLogger.Printf("    Retrying no luck...")
 	var firstDisconnect *Event
 	begin := time.Now()
-	for time.Since(begin) < 6*time.Second {
+	for time.Now().Sub(begin) < 6*time.Second {
 		disconnectedEvent := sl.NewWatcher(sessionStateMatcher(StateDisconnected)).Wait(4 * time.Second)
 		if disconnectedEvent == nil {
 			t.Fatalf("Disconnected event expected")

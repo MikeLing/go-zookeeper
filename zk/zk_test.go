@@ -97,6 +97,95 @@ func TestCreate(t *testing.T) {
 	}
 }
 
+func TestCreateTTL(t *testing.T) {
+	ts, err := StartTestCluster(t, 1, nil, logWriter{t: t, p: "[ZKERR] "})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ts.Stop()
+	zk, _, err := ts.ConnectAll()
+	if err != nil {
+		t.Fatalf("Connect returned error: %+v", err)
+	}
+	defer zk.Close()
+
+	path := "/gozk-test"
+
+	if err := zk.Delete(path, -1); err != nil && err != ErrNoNode {
+		t.Fatalf("Delete returned error: %+v", err)
+	}
+	if _, err := zk.CreateTTL("", []byte{1, 2, 3, 4}, FlagTTL|FlagEphemeral, WorldACL(PermAll), 60*time.Second); err != ErrInvalidPath {
+		t.Fatalf("Create path check failed")
+	}
+	if _, err := zk.CreateTTL(path, []byte{1, 2, 3, 4}, 0, WorldACL(PermAll), 60*time.Second); err != ErrInvalidFlags {
+		t.Fatalf("Create flags check failed")
+	}
+	if p, err := zk.CreateTTL(path, []byte{1, 2, 3, 4}, FlagTTL|FlagEphemeral, WorldACL(PermAll), 60*time.Second); err != nil {
+		t.Fatalf("Create returned error: %+v", err)
+	} else if p != path {
+		t.Fatalf("Create returned different path '%s' != '%s'", p, path)
+	}
+	if data, stat, err := zk.Get(path); err != nil {
+		t.Fatalf("Get returned error: %+v", err)
+	} else if stat == nil {
+		t.Fatal("Get returned nil stat")
+	} else if len(data) < 4 {
+		t.Fatal("Get returned wrong size data")
+	}
+
+	if err := zk.Delete(path, -1); err != nil && err != ErrNoNode {
+		t.Fatalf("Delete returned error: %+v", err)
+	}
+	if p, err := zk.CreateTTL(path, []byte{1, 2, 3, 4}, FlagTTL|FlagSequence, WorldACL(PermAll), 60*time.Second); err != nil {
+		t.Fatalf("Create returned error: %+v", err)
+	} else if !strings.HasPrefix(p, path) {
+		t.Fatalf("Create returned invalid path '%s' are not '%s' with sequence", p, path)
+	} else if data, stat, err := zk.Get(p); err != nil {
+		t.Fatalf("Get returned error: %+v", err)
+	} else if stat == nil {
+		t.Fatal("Get returned nil stat")
+	} else if len(data) < 4 {
+		t.Fatal("Get returned wrong size data")
+	}
+}
+
+func TestCreateContainer(t *testing.T) {
+	ts, err := StartTestCluster(t, 1, nil, logWriter{t: t, p: "[ZKERR] "})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ts.Stop()
+	zk, _, err := ts.ConnectAll()
+	if err != nil {
+		t.Fatalf("Connect returned error: %+v", err)
+	}
+	defer zk.Close()
+
+	path := "/gozk-test"
+
+	if err := zk.Delete(path, -1); err != nil && err != ErrNoNode {
+		t.Fatalf("Delete returned error: %+v", err)
+	}
+	if _, err := zk.CreateContainer("", []byte{1, 2, 3, 4}, FlagTTL, WorldACL(PermAll)); err != ErrInvalidPath {
+		t.Fatalf("Create path check failed")
+	}
+	if _, err := zk.CreateContainer(path, []byte{1, 2, 3, 4}, 0, WorldACL(PermAll)); err != ErrInvalidFlags {
+		t.Fatalf("Create flags check failed")
+	}
+	if p, err := zk.CreateContainer(path, []byte{1, 2, 3, 4}, FlagTTL, WorldACL(PermAll)); err != nil {
+		t.Fatalf("Create returned error: %+v", err)
+	} else if p != path {
+		t.Fatalf("Create returned different path '%s' != '%s'", p, path)
+	}
+	if data, stat, err := zk.Get(path); err != nil {
+		t.Fatalf("Get returned error: %+v", err)
+	} else if stat == nil {
+		t.Fatal("Get returned nil stat")
+	} else if len(data) < 4 {
+		t.Fatal("Get returned wrong size data")
+	}
+}
+
 func TestIncrementalReconfig(t *testing.T) {
 	if val, ok := os.LookupEnv("zk_version"); ok {
 		if !strings.HasPrefix(val, "3.5") {
@@ -241,7 +330,37 @@ func TestReconfig(t *testing.T) {
 
 	_, err = zk.Reconfig(s, -1)
 	requireNoError(t, err, "failed to reconfig cluster")
+}
 
+func TestOpsAfterCloseDontDeadlock(t *testing.T) {
+	ts, err := StartTestCluster(t, 1, nil, logWriter{t: t, p: "[ZKERR] "})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ts.Stop()
+	zk, _, err := ts.ConnectAll()
+	if err != nil {
+		t.Fatalf("Connect returned error: %+v", err)
+	}
+	zk.Close()
+
+	path := "/gozk-test"
+
+	ch := make(chan struct{})
+	go func() {
+		defer close(ch)
+		for range make([]struct{}, 30) {
+			if _, err := zk.Create(path, []byte{1, 2, 3, 4}, 0, WorldACL(PermAll)); err == nil {
+				t.Fatal("Create did not return error")
+			}
+		}
+	}()
+	select {
+	case <-ch:
+		// expected
+	case <-time.After(10 * time.Second):
+		t.Fatal("ZK connection deadlocked when executing ops after a Close operation")
+	}
 }
 
 func TestMulti(t *testing.T) {
@@ -290,6 +409,7 @@ func TestIfAuthdataSurvivesReconnect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer ts.Stop()
 
 	zk, _, err := ts.ConnectAll()
 	if err != nil {
@@ -459,20 +579,20 @@ func TestAuth(t *testing.T) {
 		t.Fatalf("Create returned different path '%s' != '%s'", p, path)
 	}
 
-	if a, stat, err := zk.GetACL(path); err != nil {
-		t.Fatalf("GetACL returned error %+v", err)
-	} else if stat == nil {
-		t.Fatalf("GetACL returned nil Stat")
-	} else if len(a) != 1 || acl[0] != a[0] {
-		t.Fatalf("GetACL mismatch expected %+v instead of %+v", acl, a)
-	}
-
 	if _, _, err := zk.Get(path); err != ErrNoAuth {
 		t.Fatalf("Get returned error %+v instead of ErrNoAuth", err)
 	}
 
 	if err := zk.AddAuth("digest", []byte("user:password")); err != nil {
 		t.Fatalf("AddAuth returned error %+v", err)
+	}
+
+	if a, stat, err := zk.GetACL(path); err != nil {
+		t.Fatalf("GetACL returned error %+v", err)
+	} else if stat == nil {
+		t.Fatalf("GetACL returned nil Stat")
+	} else if len(a) != 1 || acl[0] != a[0] {
+		t.Fatalf("GetACL mismatch expected %+v instead of %+v", acl, a)
 	}
 
 	if data, stat, err := zk.Get(path); err != nil {
@@ -576,7 +696,7 @@ func TestChildWatch(t *testing.T) {
 		if ev.Path != "/" {
 			t.Fatalf("Child watcher wrong path %s instead of %s", ev.Path, "/")
 		}
-	case <-time.After(time.Second * 2):
+	case _ = <-time.After(time.Second * 2):
 		t.Fatal("Child watcher timed out")
 	}
 
@@ -603,7 +723,7 @@ func TestChildWatch(t *testing.T) {
 		if ev.Path != "/gozk-test" {
 			t.Fatalf("Child watcher wrong path %s instead of %s", ev.Path, "/")
 		}
-	case <-time.After(time.Second * 2):
+	case _ = <-time.After(time.Second * 2):
 		t.Fatal("Child watcher timed out")
 	}
 }
@@ -815,6 +935,16 @@ func TestRequestFail(t *testing.T) {
 	case <-time.After(time.Second * 2):
 		t.Fatal("Get hung when connection could not be made")
 	}
+}
+
+func TestIdempotentClose(t *testing.T) {
+	zk, _, err := Connect([]string{"127.0.0.1:32444"}, time.Second*15)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// multiple calls to Close() should not panic
+	zk.Close()
+	zk.Close()
 }
 
 func TestSlowServer(t *testing.T) {
